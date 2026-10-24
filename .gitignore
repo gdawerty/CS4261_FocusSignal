@@ -218,3 +218,49 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Swift, Swift Package Manager, and Xcode
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.xcarchive
+*.xcresult
+*.ipa
+*.dSYM/
+*.dSYM.zip
+
+# Developer-specific configuration and signing material
+/Config/Local.xcconfig
+.env.*
+!.env.example
+*.p12
+*.p8
+*.pem
+*.key
+*.cer
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+/Secrets/
+/secrets/
+
+# Local session data and exports (keep source fixtures outside these folders)
+/LocalData/
+/local-data/
+/Exports/
+/exports/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-wal
+*.db-shm
