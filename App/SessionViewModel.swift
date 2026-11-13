@@ -20,6 +20,11 @@ final class SessionViewModel: ObservableObject {
     var isReady: Bool { runtime != nil }
     var results: FocusSession? { database.sessions.first { $0.id == presentedResultsID } }
 
+    func exportCSV(sessionID: UUID? = nil) -> String {
+        let sessions = sessionID.map { id in database.sessions.filter { $0.id == id } } ?? database.sessions
+        return SessionCSVExporter.csv(sessions: sessions)
+    }
+
     init() {
         do {
             let runtime = try ScreenTimeRuntime()
@@ -57,14 +62,31 @@ final class SessionViewModel: ObservableObject {
 
     @discardableResult
     func start(title: String, mode: TriggerMode, configuration: SessionConfiguration,
+               experimentCondition: ExperimentCondition? = nil, participantCode: String? = nil,
                selection: FamilyActivitySelection, demoAppIDs: Set<String>) -> Bool {
         guard let runtime else { return false }
         return perform {
-            try runtime.start(title: title, mode: mode, configuration: configuration, selection: selection, demoAppIDs: demoAppIDs)
+            try runtime.start(title: title, mode: mode, configuration: configuration,
+                              experimentCondition: experimentCondition, participantCode: participantCode,
+                              selection: selection, demoAppIDs: demoAppIDs)
             presentedResultsID = nil
             demoFeedback = ""
             database = try runtime.store.read()
         }
+    }
+
+    @discardableResult
+    func reportIntent(_ intent: ReportedIntent, trigger: TriggerRecord) -> Bool {
+        guard let runtime, let session = active else { return false }
+        var accepted = false
+        let succeeded = perform {
+            accepted = try runtime.mutate {
+                $0.reportIntent(sessionID: session.id, triggerID: trigger.id, intent: intent, at: Date())
+            }
+            database = try runtime.store.read()
+            if !accepted { throw FocusError.invalidDecision }
+        }
+        return succeeded && accepted
     }
 
     func attempt(appID: String, force: Bool = false) {
@@ -101,7 +123,7 @@ final class SessionViewModel: ObservableObject {
             if !session.apps.contains(where: { $0.id == appID }) {
                 demoFeedback = "Ignored: this Shortcuts app alias isn’t selected."
             } else if session.allowedAppIDs.contains(appID) {
-                demoFeedback = "Ignored: Continue already allowed this app until the session ends."
+                demoFeedback = "Ignored: this app is currently exempt from interruption."
             } else if trigger != nil {
                 demoFeedback = "Shortcuts app-open threshold reached."
             } else {
@@ -125,7 +147,7 @@ final class SessionViewModel: ObservableObject {
                 return false
             }
             database = updated
-            demoFeedback = "Shortcuts app-open threshold reached. Choose Continue to return to that app if a return URL was configured."
+            demoFeedback = "Shortcuts app-open threshold reached. Choose Continue to proceed to that app if a return URL was configured."
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -146,7 +168,9 @@ final class SessionViewModel: ObservableObject {
             if decision == .continue, session.mode == .shortcuts,
                let canonical = ShortcutReturnURL.canonicalString(trigger.returnURL) {
                 returnDestination = URL(string: canonical)
-                demoFeedback = "Continue recorded. This app alias is allowed until the session ends; returning now."
+                demoFeedback = "Continue recorded for this open. Later app opens can be evaluated again; returning now."
+            } else if decision == .continue, session.mode == .shortcuts {
+                demoFeedback = "Continue recorded for this open. Switch back manually; later app opens can be evaluated again."
             } else if decision == .continue {
                 demoFeedback = "Continue recorded. This app alias is allowed until the session ends. Switch back to the app manually."
             } else {

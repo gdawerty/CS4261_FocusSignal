@@ -161,6 +161,7 @@ final class ScreenTimeRuntime {
     }
 
     func start(title: String, mode: TriggerMode, configuration: SessionConfiguration,
+               experimentCondition: ExperimentCondition? = nil, participantCode: String? = nil,
                selection: FamilyActivitySelection, demoAppIDs: Set<String>) throws {
         try reconcile()
         let apps: [SelectedApp]
@@ -174,7 +175,9 @@ final class ScreenTimeRuntime {
         }
         let now = Date()
         let session = try mutate(at: now) {
-            try $0.start(title: title, mode: mode, configuration: configuration, apps: apps, at: now)
+            try $0.start(title: title, mode: mode, configuration: configuration,
+                         experimentCondition: experimentCondition, participantCode: participantCode,
+                         apps: apps, at: now)
         }
         do {
             try engine(for: mode).start(session: session)

@@ -134,6 +134,43 @@ public enum Decision: String, Codable, Sendable {
     case goBack, `continue`
 }
 
+/// Experimental trigger arms supported by the Shortcuts app-open prototype.
+public enum ExperimentCondition: String, Codable, CaseIterable, Sendable {
+    case everyOpen
+    case behaviorTriggered
+
+    public var title: String {
+        switch self {
+        case .everyOpen: return "Every Open"
+        case .behaviorTriggered: return "Behavior Triggered"
+        }
+    }
+
+    public var attemptThreshold: Int {
+        switch self {
+        case .everyOpen: return 1
+        case .behaviorTriggered: return 3
+        }
+    }
+
+    public var windowSeconds: TimeInterval { 300 }
+}
+
+/// Participant self-report captured before choosing Go Back or Continue.
+public enum ReportedIntent: String, Codable, CaseIterable, Sendable {
+    case distracting
+    case intentional
+    case unsure
+
+    public var title: String {
+        switch self {
+        case .distracting: return "Yes, it was distracting"
+        case .intentional: return "No, it was intentional"
+        case .unsure: return "I’m not sure"
+        }
+    }
+}
+
 /// Follow-up window for observing a reported selected-app open after Go Back.
 public enum ReopenObservation {
     public static let windowSeconds: TimeInterval = 180
@@ -221,14 +258,18 @@ public struct TriggerRecord: Codable, Equatable, Identifiable, Sendable {
     public var appID: String?
     /// Held only while this intervention is pending, then cleared on decision/session end.
     public var returnURL: String?
+    /// Participant response about whether the intervention moment was actually distracting.
+    public var reportedIntent: ReportedIntent?
     public init(id: UUID = UUID(), timestamp: Date, kind: TriggerKind,
-                attemptCount: Int? = nil, appID: String? = nil, returnURL: String? = nil) {
+                attemptCount: Int? = nil, appID: String? = nil, returnURL: String? = nil,
+                reportedIntent: ReportedIntent? = nil) {
         self.id = id
         self.timestamp = timestamp
         self.kind = kind
         self.attemptCount = attemptCount
         self.appID = appID
         self.returnURL = returnURL
+        self.reportedIntent = reportedIntent
     }
 }
 
@@ -275,6 +316,10 @@ public struct FocusSession: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var title: String
     public var mode: TriggerMode
+    /// Nil on non-experiment sessions and on sessions saved before experiment support.
+    public var experimentCondition: ExperimentCondition?
+    /// Pseudonymous study code; participants should not enter their name.
+    public var participantCode: String?
     public var configuration: SessionConfiguration
     public var startedAt: Date
     public var scheduledEnd: Date
@@ -309,6 +354,11 @@ public struct SessionMetrics: Equatable, Sendable {
     public let goBackCount: Int
     public let continueCount: Int
     public let continueReasonCounts: [ContinueReason: Int]
+    public let distractingInterventionCount: Int
+    public let intentionalInterventionCount: Int
+    public let unsureInterventionCount: Int
+    public let unansweredIntentCount: Int
+    public let sessionDurationSeconds: TimeInterval?
     public let reopenTrackingAvailable: Bool
     public let trackedGoBackCount: Int
     public let reopenedAfterGoBackCount: Int
@@ -321,6 +371,16 @@ public struct SessionMetrics: Equatable, Sendable {
     public var continueFraction: Double? {
         decisionCount == 0 ? nil : Double(continueCount) / Double(decisionCount)
     }
+    /// Intentional reports divided by answered distracting/intentional reports; unsure is excluded.
+    public var falsePositiveRate: Double? {
+        let classifiedCount = distractingInterventionCount + intentionalInterventionCount
+        return classifiedCount == 0 ? nil : Double(intentionalInterventionCount) / Double(classifiedCount)
+    }
+    /// Reopened Go Back decisions divided by completed follow-up windows; incomplete windows are excluded.
+    public var reopenRate: Double? {
+        let completedCount = reopenedAfterGoBackCount + noReopenObservedCount
+        return completedCount == 0 ? nil : Double(reopenedAfterGoBackCount) / Double(completedCount)
+    }
     public init(session: FocusSession, asOf date: Date = Date()) {
         triggerCount = session.triggers.count
         goBackCount = session.decisions.filter { $0.decision == .goBack }.count
@@ -328,6 +388,11 @@ public struct SessionMetrics: Equatable, Sendable {
         continueReasonCounts = Dictionary(grouping: session.decisions.compactMap { decision in
             decision.decision == .continue ? decision.continueReason : nil
         }, by: { $0 }).mapValues(\.count)
+        distractingInterventionCount = session.triggers.filter { $0.reportedIntent == .distracting }.count
+        intentionalInterventionCount = session.triggers.filter { $0.reportedIntent == .intentional }.count
+        unsureInterventionCount = session.triggers.filter { $0.reportedIntent == .unsure }.count
+        unansweredIntentCount = session.triggers.filter { $0.reportedIntent == nil }.count
+        sessionDurationSeconds = session.endedAt.map { max(0, $0.timeIntervalSince(session.startedAt)) }
 
         reopenTrackingAvailable = session.mode == .shortcuts
         let trackedDecisions = session.mode == .shortcuts

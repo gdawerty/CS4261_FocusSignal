@@ -33,6 +33,13 @@ final class FocusSignalUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["activeSession"].waitForExistence(timeout: 5))
     }
 
+    private func selectExperimentCondition(_ title: String) {
+        let condition = app.segmentedControls["experimentCondition"]
+        for _ in 0..<5 where !condition.isHittable { app.swipeUp() }
+        XCTAssertTrue(condition.waitForExistence(timeout: 5))
+        condition.buttons[title].tap()
+    }
+
     private func openTestingPanel() {
         let panel = app.buttons["testingPanel"]
         for _ in 0..<3 where !panel.isHittable { app.swipeUp() }
@@ -122,6 +129,8 @@ final class FocusSignalUITests: XCTestCase {
         shortcutLink.tap()
 
         XCTAssertTrue(app.staticTexts["frictionTitle"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["reportedIntent.distracting"].exists)
+        app.buttons["reportedIntent.distracting"].tap()
         XCTAssertTrue(app.buttons["friction.goBack"].exists)
         XCTAssertTrue(app.buttons["friction.continue"].exists)
         app.buttons["friction.continue"].tap()
@@ -139,5 +148,26 @@ final class FocusSignalUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Session results"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["results.reopened"].label.contains("1"))
         XCTAssertTrue(app.descendants(matching: .any)["results.noReopen"].label.contains("0"))
+    }
+
+    func testEveryOpenConditionIntervenesOnFirstReportedOpen() {
+        XCTAssertTrue(app.buttons["setupSession"].waitForExistence(timeout: 10))
+        app.buttons["setupSession"].tap()
+        let mode = app.segmentedControls["sessionMode"]
+        XCTAssertTrue(mode.waitForExistence(timeout: 5))
+        mode.buttons["Shortcuts"].tap()
+        selectExperimentCondition("Every Open")
+        let start = app.buttons["startFocusSession"]
+        for _ in 0..<5 where !start.isHittable { app.swipeUp() }
+        XCTAssertTrue(start.isHittable)
+        start.tap()
+        XCTAssertTrue(app.staticTexts["activeSession"].waitForExistence(timeout: 5))
+
+        let shortcutLink = app.descendants(matching: .any)["shortcutTestLink"]
+        for _ in 0..<5 where !shortcutLink.isHittable { app.swipeUp() }
+        XCTAssertTrue(shortcutLink.waitForExistence(timeout: 5))
+        shortcutLink.tap()
+        XCTAssertTrue(app.staticTexts["frictionTitle"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["reportedIntent.distracting"].exists)
     }
 }

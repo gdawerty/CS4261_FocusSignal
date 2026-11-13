@@ -8,15 +8,30 @@ public struct SessionDatabase: Codable, Equatable, Sendable {
 
     @discardableResult
     public mutating func start(title: String, mode: TriggerMode, configuration: SessionConfiguration,
+                               experimentCondition: ExperimentCondition? = nil, participantCode: String? = nil,
                                apps: [SelectedApp], at date: Date, id: UUID = UUID()) throws -> FocusSession {
         expire(at: date)
         guard activeSession == nil else { throw FocusError.sessionAlreadyActive }
-        try configuration.validate()
+        var effectiveConfiguration = configuration
+        let effectiveCondition = mode == .shortcuts ? (experimentCondition ?? .behaviorTriggered) : nil
+        if let effectiveCondition {
+            effectiveConfiguration.attemptThreshold = effectiveCondition.attemptThreshold
+            effectiveConfiguration.windowSeconds = effectiveCondition.windowSeconds
+            // Keep exposure consistent across experimental arms.
+            effectiveConfiguration.cooldownSeconds = 60
+        }
+        try effectiveConfiguration.validate()
         guard !apps.isEmpty, Set(apps.map(\.id)).count == apps.count else { throw FocusError.emptySelection }
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedParticipantCode = participantCode?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedParticipantCode = trimmedParticipantCode.flatMap {
+            $0.isEmpty ? nil : String($0.prefix(32))
+        }
         let session = FocusSession(id: id, title: trimmed.isEmpty ? "Studying" : trimmed, mode: mode,
-                                   configuration: configuration, startedAt: date,
-                                   scheduledEnd: date.addingTimeInterval(Double(configuration.durationMinutes * 60)),
+                                   experimentCondition: effectiveCondition,
+                                   participantCode: normalizedParticipantCode,
+                                   configuration: effectiveConfiguration, startedAt: date,
+                                   scheduledEnd: date.addingTimeInterval(Double(effectiveConfiguration.durationMinutes * 60)),
                                    apps: apps)
         sessions.append(session)
         // Bound local prototype history to 50 sessions; active session is always the newest.
@@ -54,6 +69,21 @@ public struct SessionDatabase: Codable, Equatable, Sendable {
               sessions[index].mode == .deviceActivity, sessions[index].isActive(at: date),
               sessions[index].triggers.isEmpty else { return false }
         sessions[index].triggers.append(TriggerRecord(timestamp: date, kind: .usageThreshold))
+        return true
+    }
+
+    /// Stores the participant's intervention-fit response before they choose what to do next.
+    @discardableResult
+    public mutating func reportIntent(sessionID: UUID, triggerID: UUID,
+                                      intent: ReportedIntent, at date: Date) -> Bool {
+        expire(at: date)
+        guard let sessionIndex = sessions.firstIndex(where: { $0.id == sessionID }),
+              sessions[sessionIndex].mode == .shortcuts,
+              sessions[sessionIndex].isActive(at: date),
+              sessions[sessionIndex].pendingTriggerID == triggerID,
+              let triggerIndex = sessions[sessionIndex].triggers.firstIndex(where: { $0.id == triggerID }),
+              sessions[sessionIndex].triggers[triggerIndex].reportedIntent == nil else { return false }
+        sessions[sessionIndex].triggers[triggerIndex].reportedIntent = intent
         return true
     }
 
@@ -150,6 +180,10 @@ public struct SessionDatabase: Codable, Equatable, Sendable {
         if sessions[index].mode == .simulated {
             guard sessions[index].pendingTriggerID == triggerID, trigger.appID == appID else { return false }
         }
+        if sessions[index].mode == .shortcuts, sessions[index].experimentCondition != nil {
+            guard trigger.reportedIntent != nil else { return false }
+            if decision == .continue, continueReason == nil { return false }
+        }
         let reopenObservationEndsAt = decision == .goBack && sessions[index].mode == .shortcuts
             ? date.addingTimeInterval(ReopenObservation.windowSeconds)
             : nil
@@ -157,7 +191,11 @@ public struct SessionDatabase: Codable, Equatable, Sendable {
                                                         timestamp: date, decision: decision,
                                                         continueReason: decision == .continue ? continueReason : nil,
                                                         reopenObservationEndsAt: reopenObservationEndsAt))
-        if decision == .continue { sessions[index].allowedAppIDs.insert(appID) }
+        let continueExemptsForSession = sessions[index].mode != .shortcuts
+            || sessions[index].experimentCondition == nil
+        if decision == .continue, continueExemptsForSession {
+            sessions[index].allowedAppIDs.insert(appID)
+        }
         if let triggerIndex = sessions[index].triggers.firstIndex(where: { $0.id == triggerID }) {
             sessions[index].triggers[triggerIndex].returnURL = nil
         }

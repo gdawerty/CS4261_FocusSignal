@@ -36,9 +36,10 @@ final class SessionTests: XCTestCase {
         XCTAssertNotNil(state.simulateAttempt(sessionID: id, appID: "video", at: now.addingTimeInterval(601.01)))
     }
 
-    func testShortcutAppOpensTriggerOnlyForSelectedAliasesAndContinueExemptsOneAlias() throws {
+    func testBehaviorTriggeredCountsSelectedAliasesAndContinueDoesNotExemptForSession() throws {
         var state = SessionDatabase()
         try state.start(title: "Studying", mode: .shortcuts, configuration: .init(),
+                        experimentCondition: .behaviorTriggered,
                         apps: [SelectedApp(id: "video"), SelectedApp(id: "feed"), SelectedApp(id: "forum")], at: now)
         let id = try XCTUnwrap(state.activeSession?.id)
         XCTAssertNil(state.simulateAttempt(sessionID: id, appID: "video", at: now))
@@ -49,12 +50,83 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(trigger.attemptCount, 3)
         XCTAssertEqual(trigger.appID, "forum")
 
+        XCTAssertTrue(state.reportIntent(sessionID: id, triggerID: trigger.id,
+                                          intent: .intentional, at: now.addingTimeInterval(60.5)))
         XCTAssertTrue(state.decide(sessionID: id, appID: "forum", triggerID: trigger.id,
-                                   decision: .continue, at: now.addingTimeInterval(61)))
+                                   decision: .continue, at: now.addingTimeInterval(61),
+                                   continueReason: .takingBreak))
         XCTAssertNil(state.recordShortcutAttempt(sessionID: id, appID: "forum", at: now.addingTimeInterval(62)))
+        XCTAssertTrue(state.activeSession?.allowedAppIDs.isEmpty == true)
         XCTAssertNil(state.recordShortcutAttempt(sessionID: id, appID: "video", at: now.addingTimeInterval(122)))
         XCTAssertNil(state.recordShortcutAttempt(sessionID: id, appID: "feed", at: now.addingTimeInterval(123)))
         XCTAssertNotNil(state.recordShortcutAttempt(sessionID: id, appID: "video", at: now.addingTimeInterval(124)))
+    }
+
+    func testExperimentConditionsIntentMetricsAndContinueForThisOpenOnly() throws {
+        var everyOpen = SessionDatabase()
+        try everyOpen.start(title: "Study", mode: .shortcuts,
+                            configuration: .init(attemptThreshold: 10, windowSeconds: 60, cooldownSeconds: 0),
+                            experimentCondition: .everyOpen, participantCode: " P01 ",
+                            apps: [SelectedApp(id: "feed")], at: now)
+        let sessionID = try XCTUnwrap(everyOpen.activeSession?.id)
+        XCTAssertEqual(everyOpen.activeSession?.experimentCondition, .everyOpen)
+        XCTAssertEqual(everyOpen.activeSession?.participantCode, "P01")
+        XCTAssertEqual(everyOpen.activeSession?.configuration.attemptThreshold, 1)
+        XCTAssertEqual(everyOpen.activeSession?.configuration.windowSeconds, 300)
+        XCTAssertEqual(everyOpen.activeSession?.configuration.cooldownSeconds, 60)
+
+        let first = try XCTUnwrap(everyOpen.recordShortcutOpen(appID: "feed", at: now))
+        XCTAssertFalse(everyOpen.decide(sessionID: sessionID, appID: "feed", triggerID: first.id,
+                                        decision: .goBack, at: now.addingTimeInterval(0.5)))
+        XCTAssertTrue(everyOpen.reportIntent(sessionID: sessionID, triggerID: first.id,
+                                             intent: .distracting, at: now.addingTimeInterval(0.5)))
+        XCTAssertFalse(everyOpen.reportIntent(sessionID: sessionID, triggerID: first.id,
+                                              intent: .intentional, at: now.addingTimeInterval(0.6)))
+        XCTAssertFalse(everyOpen.decide(sessionID: sessionID, appID: "feed", triggerID: first.id,
+                                        decision: .continue, at: now.addingTimeInterval(0.7)))
+        XCTAssertTrue(everyOpen.decide(sessionID: sessionID, appID: "feed", triggerID: first.id,
+                                       decision: .goBack, at: now.addingTimeInterval(1)))
+
+        let second = try XCTUnwrap(everyOpen.recordShortcutOpen(appID: "feed", at: now.addingTimeInterval(62)))
+        XCTAssertTrue(everyOpen.reportIntent(sessionID: sessionID, triggerID: second.id,
+                                             intent: .intentional, at: now.addingTimeInterval(62.5)))
+        XCTAssertFalse(everyOpen.decide(sessionID: sessionID, appID: "feed", triggerID: second.id,
+                                        decision: .continue, at: now.addingTimeInterval(62.8)))
+        XCTAssertTrue(everyOpen.decide(sessionID: sessionID, appID: "feed", triggerID: second.id,
+                                       decision: .continue, at: now.addingTimeInterval(63),
+                                       continueReason: .takingBreak))
+        XCTAssertTrue(everyOpen.activeSession?.allowedAppIDs.isEmpty == true)
+
+        let third = try XCTUnwrap(everyOpen.recordShortcutOpen(appID: "feed", at: now.addingTimeInterval(124)))
+        XCTAssertTrue(everyOpen.reportIntent(sessionID: sessionID, triggerID: third.id,
+                                             intent: .unsure, at: now.addingTimeInterval(124.5)))
+        XCTAssertTrue(everyOpen.decide(sessionID: sessionID, appID: "feed", triggerID: third.id,
+                                       decision: .goBack, at: now.addingTimeInterval(125)))
+        everyOpen.end(sessionID: sessionID, at: now.addingTimeInterval(200))
+
+        let metrics = SessionMetrics(session: try XCTUnwrap(everyOpen.sessions.first))
+        XCTAssertEqual(metrics.distractingInterventionCount, 1)
+        XCTAssertEqual(metrics.intentionalInterventionCount, 1)
+        XCTAssertEqual(metrics.unsureInterventionCount, 1)
+        XCTAssertEqual(metrics.unansweredIntentCount, 0)
+        XCTAssertEqual(metrics.falsePositiveRate ?? -1, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(metrics.goBackFraction ?? -1, 2.0 / 3.0, accuracy: 0.0001)
+        XCTAssertEqual(metrics.reopenedAfterGoBackCount, 1)
+        XCTAssertEqual(metrics.incompleteFollowUpCount, 1)
+        XCTAssertEqual(metrics.reopenRate, 1)
+        XCTAssertEqual(metrics.sessionDurationSeconds, 200)
+
+        var behaviorTriggered = SessionDatabase()
+        try behaviorTriggered.start(title: "Study", mode: .shortcuts, configuration: .init(),
+                                    experimentCondition: .behaviorTriggered,
+                                    apps: [SelectedApp(id: "feed")], at: now)
+        XCTAssertEqual(behaviorTriggered.activeSession?.configuration.attemptThreshold, 3)
+        XCTAssertEqual(behaviorTriggered.activeSession?.configuration.windowSeconds, 300)
+        let behaviorSessionID = try XCTUnwrap(behaviorTriggered.activeSession?.id)
+        XCTAssertNil(behaviorTriggered.recordShortcutOpen(appID: "feed", at: now))
+        XCTAssertNil(behaviorTriggered.recordShortcutOpen(appID: "feed", at: now.addingTimeInterval(1)))
+        XCTAssertNotNil(behaviorTriggered.recordShortcutOpen(appID: "feed", at: now.addingTimeInterval(2)))
+        XCTAssertEqual(behaviorTriggered.activeSession?.id, behaviorSessionID)
     }
 
     func testShortcutBackgroundEventIsNoOpWithoutActiveShortcutSession() throws {
@@ -72,12 +144,15 @@ final class SessionTests: XCTestCase {
         var state = SessionDatabase()
         let configuration = SessionConfiguration(attemptThreshold: 3, windowSeconds: 300, cooldownSeconds: 60)
         try state.start(title: "Studying", mode: .shortcuts, configuration: configuration,
+                        experimentCondition: .behaviorTriggered,
                         apps: [SelectedApp(id: "feed"), SelectedApp(id: "video")], at: now)
         let id = try XCTUnwrap(state.activeSession?.id)
 
         XCTAssertNil(state.recordShortcutOpen(appID: "feed", at: now))
         XCTAssertNil(state.recordShortcutOpen(appID: "video", at: now.addingTimeInterval(1)))
         let firstTrigger = try XCTUnwrap(state.recordShortcutOpen(appID: "feed", at: now.addingTimeInterval(2)))
+        XCTAssertTrue(state.reportIntent(sessionID: id, triggerID: firstTrigger.id,
+                                          intent: .distracting, at: now.addingTimeInterval(2.5)))
         XCTAssertTrue(state.decide(sessionID: id, appID: "feed", triggerID: firstTrigger.id,
                                    decision: .goBack, at: now.addingTimeInterval(3)))
         XCTAssertTrue(state.activeSession?.attemptTimes.isEmpty == true)
@@ -97,10 +172,12 @@ final class SessionTests: XCTestCase {
     func testShortcutGoBackTracksFirstSelectedAppReopenDuringCooldown() throws {
         var state = SessionDatabase()
         try state.start(title: "Studying", mode: .shortcuts,
-                        configuration: .init(attemptThreshold: 1, cooldownSeconds: 60),
+                        configuration: .init(), experimentCondition: .everyOpen,
                         apps: [SelectedApp(id: "feed"), SelectedApp(id: "video")], at: now)
         let id = try XCTUnwrap(state.activeSession?.id)
         let trigger = try XCTUnwrap(state.recordShortcutOpen(appID: "feed", at: now))
+        XCTAssertTrue(state.reportIntent(sessionID: id, triggerID: trigger.id,
+                                          intent: .distracting, at: now.addingTimeInterval(0.5)))
         XCTAssertTrue(state.decide(sessionID: id, appID: "feed", triggerID: trigger.id,
                                    decision: .goBack, at: now.addingTimeInterval(1)))
 
@@ -127,10 +204,12 @@ final class SessionTests: XCTestCase {
         func stateAfterGoBack() throws -> (SessionDatabase, UUID) {
             var state = SessionDatabase()
             try state.start(title: "Studying", mode: .shortcuts,
-                            configuration: .init(attemptThreshold: 1, cooldownSeconds: 0),
+                            configuration: .init(), experimentCondition: .everyOpen,
                             apps: [SelectedApp(id: "feed")], at: now)
             let id = try XCTUnwrap(state.activeSession?.id)
             let trigger = try XCTUnwrap(state.recordShortcutOpen(appID: "feed", at: now))
+            XCTAssertTrue(state.reportIntent(sessionID: id, triggerID: trigger.id,
+                                              intent: .distracting, at: now.addingTimeInterval(0.5)))
             XCTAssertTrue(state.decide(sessionID: id, appID: "feed", triggerID: trigger.id,
                                        decision: .goBack, at: now.addingTimeInterval(1)))
             return (state, id)
@@ -158,27 +237,32 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(metrics.noReopenObservedCount, 1)
     }
 
-    func testShortcutContinueSuppressesFutureInterventionsAndClearsReturnURL() throws {
+    func testShortcutContinueClearsReturnURLAndDoesNotExemptFutureOpen() throws {
         var state = SessionDatabase()
         try state.start(title: "Studying", mode: .shortcuts,
-                        configuration: .init(attemptThreshold: 1, cooldownSeconds: 0),
+                        configuration: .init(), experimentCondition: .everyOpen,
                         apps: [SelectedApp(id: "feed"), SelectedApp(id: "video")], at: now)
         let id = try XCTUnwrap(state.activeSession?.id)
         let trigger = try XCTUnwrap(state.recordShortcutOpen(appID: "feed", returnURL: "instagram://app", at: now))
         XCTAssertEqual(trigger.returnURL, "instagram://app")
 
+        XCTAssertTrue(state.reportIntent(sessionID: id, triggerID: trigger.id,
+                                          intent: .distracting, at: now.addingTimeInterval(0.5)))
         XCTAssertTrue(state.decide(sessionID: id, appID: "feed", triggerID: trigger.id,
-                                   decision: .continue, at: now.addingTimeInterval(1)))
+                                   decision: .continue, at: now.addingTimeInterval(1),
+                                   continueReason: .takingBreak))
         XCTAssertNil(state.activeSession?.triggers.first?.returnURL)
         XCTAssertNil(state.recordShortcutOpen(appID: "feed", returnURL: "instagram://app",
                                               at: now.addingTimeInterval(2)))
-        XCTAssertNotNil(state.recordShortcutOpen(appID: "video", at: now.addingTimeInterval(3)))
+        XCTAssertFalse(state.activeSession!.allowedAppIDs.contains("feed"))
+        XCTAssertNotNil(state.recordShortcutOpen(appID: "video", at: now.addingTimeInterval(62)))
     }
 
     func testExpiredShortcutSessionDoesNotReturnAnIntervention() throws {
         var state = SessionDatabase()
         let session = try state.start(title: "Short session", mode: .shortcuts,
-                                      configuration: .init(durationMinutes: 15, attemptThreshold: 1),
+                                      configuration: .init(durationMinutes: 15),
+                                      experimentCondition: .everyOpen,
                                       apps: [SelectedApp(id: "feed")], at: now)
         XCTAssertNil(state.recordShortcutOpen(appID: "feed", at: session.scheduledEnd))
         XCTAssertNil(state.activeSession)

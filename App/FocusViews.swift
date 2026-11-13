@@ -60,11 +60,19 @@ private struct HomeView: View {
                         Button { model.presentedResultsID = session.id } label: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(session.title).foregroundStyle(.primary)
-                                Text("\(session.startedAt.formatted(date: .abbreviated, time: .shortened)) · \(session.mode == .simulated ? "Demo" : session.mode == .shortcuts ? "Shortcuts" : "Device")")
+                                Text("\(session.startedAt.formatted(date: .abbreviated, time: .shortened)) · \(session.mode == .simulated ? "Demo" : session.mode == .shortcuts ? "Shortcuts · \(session.experimentCondition?.title ?? "Legacy")" : "Device")")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }
+                }
+                Section("Data export") {
+                    SessionCSVExportLink(
+                        title: "Export All Test Data (CSV)",
+                        filename: "FocusSignal-Test-Data.csv",
+                        csv: model.exportCSV(),
+                        accessibilityIdentifier: "export.allSessions"
+                    )
                 }
             }
             Section {
@@ -87,6 +95,8 @@ private struct FocusSetupView: View {
     @ObservedObject private var authorization = AuthorizationCenter.shared
     @Environment(\.dismiss) private var dismiss
     @State private var title = "Studying"
+    @State private var participantCode = ""
+    @State private var experimentCondition = ExperimentCondition.behaviorTriggered
     @State private var mode = ScreenTimeRuntime.isShortcutDemoBuild ? TriggerMode.shortcuts : .simulated
     @State private var configuration = SessionConfiguration()
     @State private var selection = FamilyActivitySelection(includeEntireCategory: false)
@@ -111,6 +121,23 @@ private struct FocusSetupView: View {
                 }
             }
             if mode == .shortcuts {
+                Section("Experiment") {
+                    TextField("Participant code (e.g. P01)", text: $participantCode)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("participantCode")
+                    Text("Use a study code, not a name. Keep the same code across this participant’s sessions.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Picker("Trigger condition", selection: $experimentCondition) {
+                        ForEach(ExperimentCondition.allCases, id: \.self) { condition in
+                            Text(condition.title).tag(condition)
+                        }
+                    }.pickerStyle(.segmented).accessibilityIdentifier("experimentCondition")
+                    Text(experimentCondition == .everyOpen
+                         ? "One reported app open triggers an intervention. A shared 60-second cooldown applies after each decision."
+                         : "Triggers after 3 reported opens within 5 minutes. A shared 60-second cooldown applies after each decision.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 Section("Shortcuts app-open automations") {
                     Text("Make one App → Is Opened automation per distracting app. Add Record FocusSignal App Open and set that app’s alias and optional return URL. If its result is true, open focussignal-shortcuts://intervention; if false, do nothing. No active session, Continue, and cooldown events return false, so FocusSignal stays closed.")
                     ForEach(SessionViewModel.demoApps, id: \.id) { app in
@@ -123,17 +150,6 @@ private struct FocusSetupView: View {
                     }
                     Text("Optional Instagram return URL to try: instagram://app. This is an undocumented app link; verify it on your iPhone. Leave Return URL blank to switch back manually.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Stepper("Trigger after \(configuration.attemptThreshold) opens", value: $configuration.attemptThreshold, in: 2...10)
-                    Picker("Look-back window", selection: $configuration.windowSeconds) {
-                        Text("1 minute").tag(60.0)
-                        Text("5 minutes").tag(300.0)
-                        Text("10 minutes").tag(600.0)
-                    }
-                    Picker("Cooldown after a decision", selection: $configuration.cooldownSeconds) {
-                        Text("None").tag(0.0)
-                        Text("30 seconds").tag(30.0)
-                        Text("60 seconds").tag(60.0)
-                    }
                 }
             } else if mode == .simulated {
                 Section {
@@ -183,11 +199,14 @@ private struct FocusSetupView: View {
             }
             Section {
                 Text(mode == .shortcuts
-                     ? "Continue ignores this app alias for the rest of the session. Go Back records your choice; FocusSignal stays open and does not block the other app."
+                     ? "Continue proceeds this time; it does not exempt the app for the session. Later opens can be evaluated again after the shared cooldown."
                      : "Continue allows the chosen app for the rest of this session. Go Back leaves the shield in place.")
                     .font(.footnote)
                 Button("Start Focus Session") {
-                    if model.start(title: title, mode: mode, configuration: configuration, selection: selection, demoAppIDs: demoAppIDs) { dismiss() }
+                    if model.start(title: title, mode: mode, configuration: configuration,
+                                   experimentCondition: mode == .shortcuts ? experimentCondition : nil,
+                                   participantCode: mode == .shortcuts ? participantCode : nil,
+                                   selection: selection, demoAppIDs: demoAppIDs) { dismiss() }
                 }.accessibilityIdentifier("startFocusSession")
                     .disabled(mode == .simulated || mode == .shortcuts
                               ? demoAppIDs.isEmpty
@@ -302,21 +321,45 @@ private struct DeveloperPanel: View {
 private struct FrictionView: View {
     @ObservedObject var model: SessionViewModel
     let trigger: TriggerRecord
+    @State private var reportedIntent: ReportedIntent?
     @State private var choosingContinueReason = false
+
+    init(model: SessionViewModel, trigger: TriggerRecord) {
+        self.model = model
+        self.trigger = trigger
+        _reportedIntent = State(initialValue: trigger.reportedIntent)
+    }
+
+    private var requiresIntent: Bool {
+        model.active?.mode == .shortcuts && model.active?.experimentCondition != nil
+    }
+
+    private var askingIntent: Bool { requiresIntent && reportedIntent == nil }
+
     var body: some View {
         VStack(spacing: 24) {
             Image(systemName: "scope").font(.system(size: 58)).foregroundStyle(.indigo).accessibilityHidden(true)
-            Text(choosingContinueReason ? "Why do you want to continue?" : "Back to your focus?")
+            Text(askingIntent ? "Was this actually distracting?" : choosingContinueReason ? "Why do you want to continue?" : "Back to your focus?")
                 .font(.largeTitle.bold()).multilineTextAlignment(.center).accessibilityIdentifier("frictionTitle")
-            Text(choosingContinueReason
-                 ? "Choose a reason before FocusSignal returns you to the app."
-                 : model.active?.mode == .shortcuts
-                    ? "Shortcuts reported repeated opens of a selected distracting app. Do you want to pause or continue?"
-                    : "You’ve reached the simulated distraction threshold. Do you want to keep going?")
+            Text(askingIntent
+                 ? "Tell us whether this moment felt distracting. This is your self-report, not an automatic classification."
+                 : choosingContinueReason
+                    ? "Choose a reason before FocusSignal returns you to the app."
+                    : model.active?.mode == .shortcuts
+                        ? "Do you want to pause or continue?"
+                        : "You’ve reached the simulated distraction threshold. Do you want to keep going?")
                 .multilineTextAlignment(.center)
             Text(model.active?.mode == .shortcuts ? "Shortcuts event · no other app is blocked" : "Demo intervention · no other app is blocked")
                 .font(.caption).foregroundStyle(.secondary)
-            if choosingContinueReason {
+            if askingIntent {
+                ForEach(ReportedIntent.allCases, id: \.self) { intent in
+                    Button(intent.title) {
+                        if model.reportIntent(intent, trigger: trigger) { reportedIntent = intent }
+                    }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
+                    .accessibilityIdentifier("reportedIntent.\(intent.rawValue)")
+                }
+            } else if choosingContinueReason {
                 ForEach(ContinueReason.allCases, id: \.self) { reason in
                     Button(reason.title) { model.decide(.continue, trigger: trigger, continueReason: reason) }
                         .buttonStyle(.borderedProminent).controlSize(.large)
@@ -325,13 +368,16 @@ private struct FrictionView: View {
                 Button("Back to choices") { choosingContinueReason = false }
                     .buttonStyle(.bordered).accessibilityIdentifier("continueReason.cancel")
             } else {
+                if let reportedIntent {
+                    Text("Your response: \(reportedIntent.title)").font(.footnote).foregroundStyle(.secondary)
+                }
                 Button("Go Back") { model.decide(.goBack, trigger: trigger) }
                     .buttonStyle(.borderedProminent).controlSize(.large).accessibilityIdentifier("friction.goBack")
                 Button("Continue") { choosingContinueReason = true }
                     .buttonStyle(.bordered).controlSize(.large).accessibilityIdentifier("friction.continue")
             }
             Text(model.active?.mode == .shortcuts
-                 ? "Continue ignores this app alias until the session ends and returns using the configured app link, if available."
+                 ? "Continue proceeds this time. Later reported opens can be evaluated again after the shared cooldown."
                  : "Continue allows this demo app until the session ends.")
                 .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }.padding(28)
@@ -353,6 +399,13 @@ private struct SessionResultsView: View {
                 Text("These results measure your choices, not whether you returned to studying.").font(.footnote).foregroundStyle(.secondary)
             }
             Section("Session results") {
+                LabeledContent("Trigger condition", value: session.experimentCondition?.title ?? "Not assigned")
+                if let participantCode = session.participantCode {
+                    LabeledContent("Participant code", value: participantCode)
+                }
+                LabeledContent("Session duration", value: metrics.sessionDurationSeconds.map {
+                    "\(Int(($0 / 60).rounded())) minutes"
+                } ?? "—")
                 LabeledContent("Trigger episodes", value: "\(metrics.triggerCount)").accessibilityIdentifier("results.triggers")
                 LabeledContent("Go Back", value: "\(metrics.goBackCount) (\(percentage(metrics.goBackFraction)))").accessibilityIdentifier("results.goBack")
                 LabeledContent("Continue", value: "\(metrics.continueCount) (\(percentage(metrics.continueFraction)))").accessibilityIdentifier("results.continue")
@@ -365,6 +418,17 @@ private struct SessionResultsView: View {
                     ForEach(ContinueReason.allCases, id: \.self) { reason in
                         LabeledContent(reason.title, value: "\(metrics.continueReasonCounts[reason, default: 0])")
                     }
+                }
+            }
+            if session.mode == .shortcuts && session.experimentCondition != nil {
+                Section("Intervention fit · self-reported") {
+                    LabeledContent("Distracting", value: "\(metrics.distractingInterventionCount)")
+                    LabeledContent("Intentional", value: "\(metrics.intentionalInterventionCount)")
+                    LabeledContent("Unsure", value: "\(metrics.unsureInterventionCount)")
+                    LabeledContent("No response", value: "\(metrics.unansweredIntentCount)")
+                    LabeledContent("False-positive estimate", value: percentage(metrics.falsePositiveRate))
+                    Text("Intentional reports ÷ (intentional + distracting reports). Unsure and unanswered interventions are excluded. This is participant self-report, not an automatic classification.")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
             }
             Section("After Go Back · 3-minute follow-up") {
@@ -385,6 +449,7 @@ private struct SessionResultsView: View {
                             .accessibilityIdentifier("results.noReopen")
                         LabeledContent("Incomplete follow-up", value: "\(metrics.incompleteFollowUpCount)")
                             .accessibilityIdentifier("results.incomplete")
+                        LabeledContent("Reopen rate · completed windows", value: percentage(metrics.reopenRate))
                     }
                     Text("A reopen means a Shortcut automation reported any selected-app open within 3 minutes after Go Back. “No reopen observed” is not proof the person stayed away: an automation may be disabled, fail to run, or the session may stop observing.")
                         .font(.footnote).foregroundStyle(.secondary)
@@ -395,6 +460,16 @@ private struct SessionResultsView: View {
                     Text("Device Activity reports aggregate usage, not each app open, so this mode cannot measure a 3-minute reopen after Go Back.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
+            }
+            Section("Export") {
+                SessionCSVExportLink(
+                    title: "Export This Session (CSV)",
+                    filename: "FocusSignal-\(session.participantCode ?? "Session")-\(Int(session.startedAt.timeIntervalSince1970)).csv",
+                    csv: model.exportCSV(sessionID: session.id),
+                    accessibilityIdentifier: "export.currentSession"
+                )
+                Text("The CSV contains a row per intervention, plus a summary row for sessions with no interventions. Share it with AirDrop or save it to Files.")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
             Section("Your feedback · 1 low, 5 high") {
                 Picker("Usefulness", selection: $usefulness) { ForEach(1...5, id: \.self) { Text("\($0)").tag($0) } }
@@ -424,8 +499,11 @@ private struct EventLogView: View {
                 if session.triggers.isEmpty { Text("No trigger events yet.") }
                 ForEach(session.triggers) { trigger in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(trigger.kind == .usageThreshold ? "Usage threshold reached" : trigger.kind == .manual ? "Manual demo trigger" : "Repeated simulated attempts")
+                        Text(trigger.kind == .usageThreshold ? "Usage threshold reached" : trigger.kind == .manual ? "Manual demo trigger" : session.mode == .shortcuts ? "Reported app-open threshold reached" : "Repeated simulated attempts")
                         Text(trigger.timestamp.formatted(date: .omitted, time: .standard)).font(.caption).foregroundStyle(.secondary)
+                        if let intent = trigger.reportedIntent {
+                            Text("Self-report: \(intent.title)").font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
